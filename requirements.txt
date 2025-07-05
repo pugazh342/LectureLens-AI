@@ -5,3 +5,4 @@ pytube
 youtube-transcript-api
 python-dotenv
 faiss-cpu # <--- ADD THIS 
+PyPDF2
