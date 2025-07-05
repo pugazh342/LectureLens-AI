@@ -15,6 +15,7 @@ from youtube_transcript_api import (
     CouldNotRetrieveTranscript
 )
 from dotenv import load_dotenv
+from streamlit.errors import StreamlitSecretNotFoundError # Import the specific error
 
 import re # Import regex for time parsing
 
@@ -24,12 +25,19 @@ load_dotenv()
 
 # --- IMPORTANT: Set your Google API Key (for Gemini) ---
 # Prioritize Streamlit secrets for deployment, fallback to os.getenv for local.
+google_api_key = None # Initialize to None
+
 try:
     # Attempt to get API key from Streamlit secrets (for Streamlit Cloud deployment)
     google_api_key = st.secrets["GOOGLE_API_KEY"]
-except (AttributeError, KeyError):
+except (KeyError, StreamlitSecretNotFoundError): # Catch both KeyError and the specific Streamlit error
     # Fallback to os.getenv for local development (reads from .env)
     google_api_key = os.getenv("GOOGLE_API_KEY")
+except Exception as e:
+    # Catch any other unexpected errors during secret loading
+    st.error(f"An unexpected error occurred while loading API key: {e}")
+    st.stop()
+
 
 # Ensure the API key is set in the environment for Langchain
 if google_api_key:
@@ -500,8 +508,7 @@ else: # This 'else' correctly pairs with 'if not st.session_state.logged_in:'
         else:
             st.write("No chat history yet for this video.")
 
-    # This 'else' correctly pairs with 'if st.session_state.video_processed:'
-    else:
+    else: # This 'else' correctly pairs with 'if st.session_state.video_processed:'
         st.info("⬆️ Enter a YouTube video URL and click 'Process Video Transcript' to begin.")
         if not st.session_state.available_languages: # Only show if no languages are listed yet
             st.info("After processing, you will be able to select the transcript language.")
