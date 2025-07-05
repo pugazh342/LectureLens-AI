@@ -286,7 +286,8 @@ if st.session_state.video_processed:
     st.subheader("💡 Key Topics & Phrases")
     if st.button("Extract Topics & Phrases"):
         with st.spinner("Extracting key information..."):
-            try:
+            # This is the try block corresponding to the `except` at line ~304
+            try: 
                 full_text_for_topics = " ".join([item.text for item in st.session_state.full_transcript_data])
                 
                 # Prompt for topic extraction
@@ -301,8 +302,8 @@ if st.session_state.video_processed:
                 
                 with st.expander("View Key Topics & Phrases"):
                     st.markdown(topics) # Use markdown as LLM output might be formatted
-            except Exception as e:
-                    st.error(f"Error extracting topics and phrases: {e}")
+            except Exception as e: # This is the line that was reported as 304 in the log
+                st.error(f"Error extracting topics and phrases: {e}")
 
         st.markdown("---")
 
