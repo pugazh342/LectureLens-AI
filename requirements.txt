@@ -1,0 +1,9 @@
+streamlit
+langchain-google-genai
+langchain-community
+pytube
+youtube-transcript-api
+python-dotenv
+# If you later decide to use firebase-admin for server-side operations,
+# you would uncomment/add it here:
+# firebase-admin
