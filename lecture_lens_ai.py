@@ -328,7 +328,7 @@ else: # This 'else' correctly pairs with 'if not st.session_state.logged_in:'
                             st.error(f"Error during Langchain processing: {e}. Please ensure your GOOGLE_API_KEY is valid and correctly configured.")
                 else:
                     st.warning(f"The retrieved {lang_options[selected_lang_code]} transcript was empty. Please try another language or video.")
-            else:
+        else:
                 st.warning(f"Could not retrieve {lang_options[selected_lang_code]} transcript content.")
 
     # Clear/Reset Button
