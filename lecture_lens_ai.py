@@ -79,15 +79,20 @@ def get_youtube_transcript_options(url):
             }
         return video_id, available_transcripts
     except TranscriptsDisabled:
-        st.error("Transcripts are disabled for this video.")
+        st.error("Transcripts are disabled for this video. Please try another video.")
+        print(f"DEBUG: TranscriptsDisabled for URL: {url}")
     except NoTranscriptFound:
-        st.error("No transcript found for this video. Please ensure English transcripts are available.")
+        st.error("No transcript found for this video. Please ensure transcripts are available or try another video.")
+        print(f"DEBUG: NoTranscriptFound for URL: {url}")
     except VideoUnavailable:
-        st.error("This video is unavailable. Please check the URL.")
+        st.error("This video is unavailable. Please check the URL or try another video.")
+        print(f"DEBUG: VideoUnavailable for URL: {url}")
     except CouldNotRetrieveTranscript:
-        st.error("Could not retrieve transcript. It may not be available in your region or due to other issues.")
+        st.error("Could not retrieve transcript. It may not be available in your region or due to other issues. Please try another video.")
+        print(f"DEBUG: CouldNotRetrieveTranscript for URL: {url}")
     except Exception as e:
-        st.error(f"An unexpected error occurred while getting the transcript options: {e}")
+        st.error(f"An unexpected error occurred while getting the transcript options: {e}. Please check the URL or try another video.")
+        print(f"DEBUG: Error in get_youtube_transcript_options: {e} for URL: {url}")
     return None, {} # Return None for video_id and empty dict on error
 
 def fetch_specific_transcript(transcript_object):
@@ -280,6 +285,7 @@ else: # This 'else' correctly pairs with 'if not st.session_state.logged_in:'
                     st.session_state.chat_history = [] # Clear chat history
                 else:
                     st.warning("Could not find any transcripts for this video or video ID could not be extracted.")
+                    st.info("Please ensure the URL is correct and the video is publicly accessible without restrictions.")
         else:
             st.warning("⚠️ Please enter a valid YouTube URL to proceed.")
 
@@ -322,7 +328,7 @@ else: # This 'else' correctly pairs with 'if not st.session_state.logged_in:'
                             st.error(f"Error during Langchain processing: {e}. Please ensure your GOOGLE_API_KEY is valid and correctly configured.")
                 else:
                     st.warning(f"The retrieved {lang_options[selected_lang_code]} transcript was empty. Please try another language or video.")
-        else:
+            else:
                 st.warning(f"Could not retrieve {lang_options[selected_lang_code]} transcript content.")
 
     # Clear/Reset Button
