@@ -1,0 +1,16 @@
+# Environment variables
+.env
+
+# Python specific ignores
+__pycache__/
+*.pyc
+*.log
+.pytest_cache/
+.ipynb_checkpoints/
+
+# Streamlit specific ignores
+.streamlit/ # This directory can contain local Streamlit configs or cached data
+
+# Application specific temporary files
+transcript.txt
+temp_section_transcript.txt
