@@ -16,6 +16,7 @@ from youtube_transcript_api import (
 )
 from dotenv import load_dotenv
 from streamlit.errors import StreamlitSecretNotFoundError # Import the specific error
+import PyPDF2 # Import PyPDF2 for PDF processing
 
 import re # Import regex for time parsing
 
@@ -49,15 +50,7 @@ else:
     )
     st.stop() # Stop the app if API key is missing
 
-# --- Firebase Initialization (Conceptual - as before) ---
-# Note: In a real production Streamlit app, you'd typically use a service account key file
-# for firebase_admin or integrate client-side Firebase JS SDK for auth.
-# For this environment, we'll manage auth state via session_state
-# and assume the Canvas handles the actual Firebase calls based on the token.
-# The `firebase_admin` SDK is typically for server-side operations.
-# We'll use a placeholder for `firebase_admin.initialize_app` as it's not directly compatible
-# with the client-side auth token provided.
-# No changes needed here from previous version, just a reminder of its conceptual nature.
+# --- Transcript Retrieval Functions ---
 
 def get_youtube_transcript_options(url):
     """
@@ -136,19 +129,33 @@ def get_qa_chain(documents):
     qa_chain = RetrievalQA.from_chain_type(llm=llm, retriever=retriever)
     return qa_chain
 
+def get_pdf_text(pdf_file):
+    """Extracts text from a PDF file."""
+    text = ""
+    try:
+        pdf_reader = PyPDF2.PdfReader(pdf_file)
+        for page in pdf_reader.pages:
+            text += page.extract_text() or "" # Handle pages with no extractable text
+    except Exception as e:
+        st.error(f"Error extracting text from PDF: {e}")
+        return None
+    return text
+
 # --- Streamlit UI ---
 st.set_page_config(page_title="LectureLens AI", layout="centered") # Updated page title
 
-st.title("📚 LectureLens AI: Your Smart YouTube Tutor") # Updated main title
+st.title("📚 LectureLens AI: Your Smart YouTube Tutor & Document Analyst") # Updated main title
 st.markdown(
     """
     Welcome to your personal AI tutor! Enter a YouTube video URL (preferably a lecture or educational video)
     to extract its transcript. Once processed, you can ask questions about the video's content,
     and the AI will provide answers based on the transcript.
+    
+    **New!** You can now also upload PDF documents and ask questions about their content.
     """
 )
 
-# Initialize session state variables (authentication related ones removed)
+# Initialize session state variables
 if 'qa_chain' not in st.session_state:
     st.session_state.qa_chain = None
 if 'full_transcript_data' not in st.session_state:
@@ -165,145 +172,157 @@ if 'selected_language_code' not in st.session_state:
     st.session_state.selected_language_code = 'en' # Default to English
 if 'custom_instructions' not in st.session_state:
     st.session_state.custom_instructions = "Act as a helpful and patient tutor. Explain complex topics clearly."
+if 'pdf_qa_chain' not in st.session_state: # New: QA chain for PDF
+    st.session_state.pdf_qa_chain = None
+if 'pdf_text_processed' not in st.session_state: # New: Flag for PDF processing
+    st.session_state.pdf_text_processed = False
+if 'pdf_chat_history' not in st.session_state: # New: Separate chat history for PDF
+    st.session_state.pdf_chat_history = []
 
-# --- Main Application Content (always visible now) ---
 
-# Input for YouTube video URL
-video_url = st.text_input("🔗 Enter YouTube Video URL:", placeholder="e.g., https://www.youtube.com/watch?v=your_video_id")
+# --- Tabbed Interface for Video vs. PDF ---
+tab1, tab2 = st.tabs(["🎥 YouTube Video Tutor", "📄 Talk to PDF Document"])
 
-# Process Video Button (Lists available transcripts)
-if st.button("✨ Process Video Transcript"):
-    if video_url:
-        with st.spinner("Fetching available transcripts..."):
-            video_id, available_transcripts = get_youtube_transcript_options(video_url)
-            if video_id and available_transcripts:
-                st.session_state.video_id = video_id # Store video ID
-                st.session_state.available_languages = available_transcripts
-                
-                # Try to pre-select English, otherwise select the first available
-                if 'en' in available_transcripts:
-                    st.session_state.selected_language_code = 'en'
-                elif available_transcripts:
-                    st.session_state.selected_language_code = list(available_transcripts.keys())[0]
+with tab1:
+    st.header("YouTube Video Analysis")
+    # Input for YouTube video URL
+    video_url = st.text_input("🔗 Enter YouTube Video URL:", placeholder="e.g., https://www.youtube.com/watch?v=your_video_id", key="youtube_url_input")
 
-                st.success("Transcripts listed. Select a language below and click 'Load Transcript'.")
-                st.session_state.video_processed = False # Mark as not fully processed yet for QA
-                st.session_state.qa_chain = None # Reset QA chain
-                st.session_state.chat_history = [] # Clear chat history
-            else:
-                st.warning("Could not find any transcripts for this video or video ID could not be extracted.")
-                st.info("Please ensure the URL is correct and the video is publicly accessible without restrictions.")
-    else:
-        st.warning("⚠️ Please enter a valid YouTube URL to proceed.")
+    # Process Video Button (Lists available transcripts)
+    if st.button("✨ Process Video Transcript", key="process_youtube_button"):
+        if video_url:
+            with st.spinner("Fetching available transcripts..."):
+                video_id, available_transcripts = get_youtube_transcript_options(video_url)
+                if video_id and available_transcripts:
+                    st.session_state.video_id = video_id # Store video ID
+                    st.session_state.available_languages = available_transcripts
+                    
+                    # Try to pre-select English, otherwise select the first available
+                    if 'en' in available_transcripts:
+                        st.session_state.selected_language_code = 'en'
+                    elif available_transcripts:
+                        st.session_state.selected_language_code = list(available_transcripts.keys())[0]
 
-# --- Language Selection and Load Transcript Button ---
-if st.session_state.available_languages:
-    st.markdown("---")
-    st.subheader("🌐 Select Transcript Language")
-    
-    lang_options = {code: f"{data['language']} ({'Generated' if data['is_generated'] else 'Manual'})" 
-                    for code, data in st.session_state.available_languages.items()}
-    
-    selected_lang_code = st.selectbox(
-        "Choose a language:",
-        options=list(lang_options.keys()),
-        format_func=lambda x: lang_options[x],
-        key="lang_selector",
-        index=list(lang_options.keys()).index(st.session_state.selected_language_code) if st.session_state.selected_language_code in lang_options else 0
-    )
-    st.session_state.selected_language_code = selected_lang_code
-
-    if st.button("▶️ Load Selected Transcript"):
-        with st.spinner(f"Loading {lang_options[selected_lang_code]} transcript..."):
-            selected_transcript_obj = st.session_state.available_languages[selected_lang_code]['transcript_object']
-            transcript_data = fetch_specific_transcript(selected_transcript_obj)
-            
-            if transcript_data:
-                st.session_state.full_transcript_data = transcript_data
-                full_text = " ".join([item.text for item in transcript_data])
-                save_transcript_to_file(full_text)
-
-                if full_text.strip():
-                    try:
-                        loader = TextLoader("transcript.txt", encoding="utf-8")
-                        documents = loader.load()
-                        st.session_state.qa_chain = get_qa_chain(documents)
-                        st.session_state.video_processed = True
-                        st.session_state.chat_history = [] # Clear history for new transcript
-                        st.success(f"✅ {lang_options[selected_lang_code]} transcript loaded successfully! You can now ask questions.")
-                    except Exception as e:
-                        st.error(f"Error during Langchain processing: {e}. Please ensure your GOOGLE_API_KEY is valid and correctly configured.")
+                    st.success("Transcripts listed. Select a language below and click 'Load Transcript'.")
+                    st.session_state.video_processed = False # Mark as not fully processed yet for QA
+                    st.session_state.qa_chain = None # Reset QA chain
+                    st.session_state.chat_history = [] # Clear chat history
+                    # Ensure PDF related states are reset when processing a new video
+                    st.session_state.pdf_qa_chain = None
+                    st.session_state.pdf_text_processed = False
+                    st.session_state.pdf_chat_history = []
                 else:
-                    st.warning(f"The retrieved {lang_options[selected_lang_code]} transcript was empty. Please try another language or video.")
-            else:
-                st.warning(f"Could not retrieve {lang_options[selected_lang_code]} transcript content.")
+                    st.warning("Could not find any transcripts for this video or video ID could not be extracted.")
+                    st.info("Please ensure the URL is correct and the video is publicly accessible without restrictions.")
+        else:
+            st.warning("⚠️ Please enter a valid YouTube URL to proceed.")
 
-# Clear/Reset Button
-if st.session_state.video_processed or st.session_state.chat_history or st.session_state.available_languages:
-    if st.button("🔄 Clear Current Video & Chat"):
-        st.session_state.qa_chain = None
-        st.session_state.full_transcript_data = []
-        st.session_state.chat_history = []
-        st.session_state.video_processed = False
-        st.session_state.video_id = None
-        st.session_state.available_languages = {}
-        st.session_state.selected_language_code = 'en'
-        st.session_state.custom_instructions = "Act as a helpful and patient tutor. Explain complex topics clearly."
+    # --- Language Selection and Load Transcript Button ---
+    if st.session_state.available_languages:
+        st.markdown("---")
+        st.subheader("🌐 Select Transcript Language")
+        
+        lang_options = {code: f"{data['language']} ({'Generated' if data['is_generated'] else 'Manual'})" 
+                        for code, data in st.session_state.available_languages.items()}
+        
+        selected_lang_code = st.selectbox(
+            "Choose a language:",
+            options=list(lang_options.keys()),
+            format_func=lambda x: lang_options[x],
+            key="lang_selector",
+            index=list(lang_options.keys()).index(st.session_state.selected_language_code) if st.session_state.selected_language_code in lang_options else 0
+        )
+        st.session_state.selected_language_code = selected_lang_code
 
-        if os.path.exists("transcript.txt"):
-            os.remove("transcript.txt")
-        if os.path.exists("temp_section_transcript.txt"):
-            os.remove("temp_section_transcript.txt")
-        st.success("Application reset. Enter a new video URL.")
+        if st.button("▶️ Load Selected Transcript", key="load_transcript_button"):
+            with st.spinner(f"Loading {lang_options[selected_lang_code]} transcript..."):
+                selected_transcript_obj = st.session_state.available_languages[selected_lang_code]['transcript_object']
+                transcript_data = fetch_specific_transcript(selected_transcript_obj)
+                
+                if transcript_data:
+                    st.session_state.full_transcript_data = transcript_data
+                    full_text = " ".join([item.text for item in transcript_data])
+                    save_transcript_to_file(full_text)
 
-st.markdown("---")
+                    if full_text.strip():
+                        try:
+                            loader = TextLoader("transcript.txt", encoding="utf-8")
+                            documents = loader.load()
+                            st.session_state.qa_chain = get_qa_chain(documents)
+                            st.session_state.video_processed = True
+                            st.session_state.chat_history = [] # Clear history for new transcript
+                            st.success(f"✅ {lang_options[selected_lang_code]} transcript loaded successfully! You can now ask questions.")
+                        except Exception as e:
+                            st.error(f"Error during Langchain processing: {e}. Please ensure your GOOGLE_API_KEY is valid and correctly configured.")
+                    else:
+                        st.warning(f"The retrieved {lang_options[selected_lang_code]} transcript was empty. Please try another language or video.")
+                else:
+                    st.warning(f"Could not retrieve {lang_options[selected_lang_code]} transcript content.")
 
-# Conditional UI elements after video is processed
-if st.session_state.video_processed:
-    # --- Video Player Embedding ---
-    if st.session_state.get('video_id'):
-        st.subheader("▶️ Video Player")
-        st.video(f"https://www.youtube.com/watch?v={st.session_state.video_id}")
+    # Clear/Reset YouTube Data Button
+    if st.session_state.video_processed or st.session_state.chat_history or st.session_state.available_languages:
+        if st.button("🔄 Clear Current Video Data & Chat", key="clear_youtube_data_button"):
+            st.session_state.qa_chain = None
+            st.session_state.full_transcript_data = []
+            st.session_state.chat_history = []
+            st.session_state.video_processed = False
+            st.session_state.video_id = None
+            st.session_state.available_languages = {}
+            st.session_state.selected_language_code = 'en'
+            # No change to custom instructions or PDF data
+            if os.path.exists("transcript.txt"):
+                os.remove("transcript.txt")
+            if os.path.exists("temp_section_transcript.txt"):
+                os.remove("temp_section_transcript.txt")
+            st.success("YouTube video data and chat reset.")
+
+    st.markdown("---")
+
+    # Conditional UI elements after video is processed
+    if st.session_state.video_processed:
+        # --- Video Player Embedding ---
+        if st.session_state.get('video_id'):
+            st.subheader("▶️ Video Player")
+            st.video(f"https://www.youtube.com/watch?v={st.session_state.video_id}")
+            st.markdown("---")
+
+        # --- Summarization Feature ---
+        st.subheader("📝 Video Summary")
+        if st.button("Generate Summary", key="generate_summary_button"):
+            with st.spinner("Generating summary..."):
+                try:
+                    full_text_for_summary = " ".join([item.text for item in st.session_state.full_transcript_data])
+                    summary_prompt = f"Please provide a concise summary of the following text:\n\n{full_text_for_summary}"
+                    llm_summary = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
+                    summary = llm_summary.invoke(summary_prompt).content
+                    with st.expander("View Summary"):
+                        st.info(f"**Summary:**\n{summary}")
+                except Exception as e:
+                    st.error(f"Error generating summary: {e}")
+
         st.markdown("---")
 
-    # --- Summarization Feature ---
-    st.subheader("📝 Video Summary")
-    if st.button("Generate Summary"):
-        with st.spinner("Generating summary..."):
-            try:
-                full_text_for_summary = " ".join([item.text for item in st.session_state.full_transcript_data])
-                summary_prompt = f"Please provide a concise summary of the following text:\n\n{full_text_for_summary}"
-                llm_summary = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
-                summary = llm_summary.invoke(summary_prompt).content
-                with st.expander("View Summary"):
-                    st.info(f"**Summary:**\n{summary}")
-            except Exception as e:
-                st.error(f"Error generating summary: {e}")
-
-    st.markdown("---")
-
-    # --- Topic Modeling / Keyphrase Extraction ---
-    st.subheader("💡 Key Topics & Phrases")
-    if st.button("Extract Topics & Phrases"):
-        with st.spinner("Extracting key information..."):
-            # This is the try block corresponding to the `except` at line ~304
-            try: 
-                full_text_for_topics = " ".join([item.text for item in st.session_state.full_transcript_data])
-                
-                # Prompt for topic extraction
-                topic_prompt = (
-                    f"Analyze the following text and extract the most important key topics and phrases. "
-                    f"Present them as a bulleted list. Limit to 5-10 key points.\n\n"
-                    f"Text:\n{full_text_for_topics}"
-                )
-                
-                llm_topics = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.5)
-                topics = llm_topics.invoke(topic_prompt).content
-                
-                with st.expander("View Key Topics & Phrases"):
-                    st.markdown(topics) # Use markdown as LLM output might be formatted
-            except Exception as e: # This is the line that was reported as 304 in the log
-                st.error(f"Error extracting topics and phrases: {e}")
+        # --- Topic Modeling / Keyphrase Extraction ---
+        st.subheader("💡 Key Topics & Phrases")
+        if st.button("Extract Topics & Phrases", key="extract_topics_button"):
+            with st.spinner("Extracting key information..."):
+                try: 
+                    full_text_for_topics = " ".join([item.text for item in st.session_state.full_transcript_data])
+                    
+                    # Prompt for topic extraction
+                    topic_prompt = (
+                        f"Analyze the following text and extract the most important key topics and phrases. "
+                        f"Present them as a bulleted list. Limit to 5-10 key points.\n\n"
+                        f"Text:\n{full_text_for_topics}"
+                    )
+                    
+                    llm_topics = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.5)
+                    topics = llm_topics.invoke(topic_prompt).content
+                    
+                    with st.expander("View Key Topics & Phrases"):
+                        st.markdown(topics) # Use markdown as LLM output might be formatted
+                except Exception as e: 
+                    st.error(f"Error extracting topics and phrases: {e}")
 
         st.markdown("---")
 
@@ -331,7 +350,7 @@ if st.session_state.video_processed:
 
         section_question = st.text_input("Ask a question about this specific section:", key="section_q")
         
-        if st.button("Ask Section Question"):
+        if st.button("Ask Section Question", key="ask_section_question_button"):
             if section_question:
                 start_seconds = parse_time_to_seconds(start_time_str)
                 end_seconds = parse_time_to_seconds(end_time_str)
@@ -426,6 +445,82 @@ if st.session_state.video_processed:
         st.info("⬆️ Enter a YouTube video URL and click 'Process Video Transcript' to begin.")
         if not st.session_state.available_languages: # Only show if no languages are listed yet
             st.info("After processing, you will be able to select the transcript language.")
+
+with tab2:
+    st.header("Talk to PDF Document")
+    uploaded_file = st.file_uploader("Upload a PDF document", type="pdf", key="pdf_uploader")
+
+    if uploaded_file is not None:
+        if st.button("📚 Process PDF Document", key="process_pdf_button"):
+            with st.spinner("Processing PDF... This may take a moment for large files."):
+                pdf_text = get_pdf_text(uploaded_file)
+                if pdf_text:
+                    # Reset video-related states when processing a new PDF
+                    st.session_state.qa_chain = None
+                    st.session_state.full_transcript_data = []
+                    st.session_state.chat_history = []
+                    st.session_state.video_processed = False
+                    st.session_state.video_id = None
+                    st.session_state.available_languages = {}
+                    st.session_state.selected_language_code = 'en'
+
+                    # Process PDF text for QA
+                    try:
+                        # Langchain expects a list of Document objects, so we create one
+                        from langchain_core.documents import Document
+                        pdf_documents = [Document(page_content=pdf_text)]
+                        
+                        st.session_state.pdf_qa_chain = get_qa_chain(pdf_documents)
+                        st.session_state.pdf_text_processed = True
+                        st.session_state.pdf_chat_history = [] # Clear PDF chat history
+                        st.success("✅ PDF processed successfully! You can now ask questions about its content.")
+                    except Exception as e:
+                        st.error(f"Error during Langchain processing for PDF: {e}. Please ensure your GOOGLE_API_KEY is valid and correctly configured.")
+                else:
+                    st.warning("Could not extract text from the PDF. It might be an image-based PDF or corrupted.")
+    
+    # Clear PDF Data Button
+    if st.session_state.pdf_text_processed or st.session_state.pdf_chat_history:
+        if st.button("🔄 Clear Current PDF Data & Chat", key="clear_pdf_data_button"):
+            st.session_state.pdf_qa_chain = None
+            st.session_state.pdf_text_processed = False
+            st.session_state.pdf_chat_history = []
+            st.success("PDF data and chat reset.")
+
+    st.markdown("---")
+
+    if st.session_state.pdf_text_processed:
+        st.subheader("❓ Ask a Question about the PDF")
+        pdf_question = st.text_input("Type your question here:", placeholder="e.g., What is the main conclusion of this document?", key="pdf_general_q")
+        if pdf_question:
+            with st.spinner("Getting your answer from PDF..."):
+                try:
+                    # Apply custom instructions to PDF question
+                    current_instructions = st.session_state.get('custom_instructions', '')
+                    if current_instructions:
+                        pdf_full_query = f"{current_instructions}\n\nQuestion: {pdf_question}"
+                    else:
+                        pdf_full_query = pdf_question
+
+                    pdf_answer = st.session_state.pdf_qa_chain.run(pdf_full_query)
+                    with st.expander("View PDF Answer"):
+                        st.info(f"**Answer:** {pdf_answer}")
+                    st.session_state.pdf_chat_history.append({"question": pdf_question, "answer": pdf_answer})
+                except Exception as e:
+                    st.error(f"Error getting answer from PDF: {e}. Please try again.")
+        
+        st.markdown("---")
+        st.subheader("💬 PDF Chat History")
+        if st.session_state.pdf_chat_history:
+            for i, chat in enumerate(st.session_state.pdf_chat_history):
+                st.markdown(f"**Q{i+1}:** {chat['question']}")
+                st.markdown(f"**A{i+1}:** {chat['answer']}")
+                st.markdown("---")
+        else:
+            st.write("No chat history yet for this PDF.")
+    else:
+        st.info("⬆️ Upload a PDF document and click 'Process PDF Document' to begin asking questions.")
+
 
 # Add developer name at the bottom
 st.markdown("---")
