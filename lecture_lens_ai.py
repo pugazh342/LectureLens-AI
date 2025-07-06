@@ -17,8 +17,10 @@ from youtube_transcript_api import (
 from dotenv import load_dotenv
 from streamlit.errors import StreamlitSecretNotFoundError # Import the specific error
 import PyPDF2 # Import PyPDF2 for PDF processing
+from fpdf import FPDF # Import FPDF for PDF generation
 
 import re # Import regex for time parsing
+import io # For downloadable content
 
 # --- Load Environment Variables (for local development) ---
 # This will load variables from .env file if it exists locally.
@@ -141,6 +143,62 @@ def get_pdf_text(pdf_file):
         return None
     return text
 
+def generate_quiz(text_content, num_questions=3):
+    """Generates a multiple-choice quiz from text content using LLM."""
+    llm = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
+    quiz_prompt = f"""
+    Generate a {num_questions}-question multiple-choice quiz based on the following text.
+    For each question, provide 4 options (A, B, C, D) and clearly indicate the correct answer.
+    Format the output clearly with questions and options.
+
+    Text:
+    {text_content[:4000]} # Limit text to avoid token limits
+    """
+    try:
+        response = llm.invoke(quiz_prompt).content
+        return response
+    except Exception as e:
+        st.error(f"Error generating quiz: {e}")
+        return "Could not generate quiz."
+
+def create_pdf_from_text(text_content, title="Document"):
+    """Creates a PDF from a string of text, handling UTF-8 characters."""
+    pdf = FPDF()
+    # Add a font that supports Unicode (like DejaVuSansCondensed)
+    # You might need to place the .ttf font file in a 'fonts' directory in your project
+    # and uncomment the line below. For basic characters, Arial might work, but for
+    # special characters, a Unicode font is necessary.
+    # pdf.add_font('DejaVuSansCondensed', '', 'fonts/DejaVuSansCondensed.ttf', uni=True)
+    # pdf.set_font("DejaVuSansCondensed", size=12) # Use the added font
+    
+    # Using Arial for now, but be aware of its limitations with non-latin characters
+    pdf.add_page()
+    pdf.set_font("Arial", size=12)
+    
+    # Add title
+    pdf.set_font("Arial", 'B', 16)
+    # Use write() for simple text that doesn't need wrapping, or multi_cell with encoding
+    pdf.write(10, title.encode('latin1', 'replace').decode('latin1')) # Encode/decode to handle title characters
+    pdf.ln(10) # Line break
+    
+    # Add content
+    pdf.set_font("Arial", size=12)
+    # FPDF's multi_cell handles UTF-8 if uni=True is set on add_font, and text is encoded
+    # If not using a Unicode font, we need to encode to latin1 and replace unencodable chars
+    
+    # Process text in chunks and encode to latin1, replacing unencodable characters
+    # This will prevent the UnicodeEncodeError but might show '?' for unsupported characters.
+    # The ideal solution is to use a Unicode font as commented above.
+    chunk_size = 2000 
+    for i in range(0, len(text_content), chunk_size):
+        chunk = text_content[i:i+chunk_size]
+        # Encode to latin1 and replace characters that cannot be encoded
+        encoded_chunk = chunk.encode('latin1', 'replace').decode('latin1')
+        pdf.multi_cell(0, 10, encoded_chunk)
+        pdf.ln(5) # Small line break between chunks
+    
+    return pdf.output(dest='S').encode('latin1') # Return as bytes, still using latin1 for output stream
+
 # --- Streamlit UI ---
 st.set_page_config(page_title="LectureLens AI", layout="centered") # Updated page title
 
@@ -178,6 +236,20 @@ if 'pdf_text_processed' not in st.session_state: # New: Flag for PDF processing
     st.session_state.pdf_text_processed = False
 if 'pdf_chat_history' not in st.session_state: # New: Separate chat history for PDF
     st.session_state.pdf_chat_history = []
+if 'video_summary' not in st.session_state: # New: Store video summary
+    st.session_state.video_summary = ""
+if 'video_topics' not in st.session_state: # New: Store video topics
+    st.session_state.video_topics = ""
+if 'pdf_summary' not in st.session_state: # New: Store PDF summary
+    st.session_state.pdf_summary = ""
+if 'pdf_topics' not in st.session_state: # New: Store PDF topics
+    st.session_state.pdf_topics = ""
+if 'current_pdf_text' not in st.session_state: # New: Store current PDF text
+    st.session_state.current_pdf_text = ""
+if 'video_quiz' not in st.session_state: # New: Store video quiz
+    st.session_state.video_quiz = ""
+if 'pdf_quiz' not in st.session_state: # New: Store pdf quiz
+    st.session_state.pdf_quiz = ""
 
 
 # --- Tabbed Interface for Video vs. PDF ---
@@ -207,10 +279,17 @@ with tab1:
                     st.session_state.video_processed = False # Mark as not fully processed yet for QA
                     st.session_state.qa_chain = None # Reset QA chain
                     st.session_state.chat_history = [] # Clear chat history
+                    st.session_state.video_summary = "" # Clear summary
+                    st.session_state.video_topics = "" # Clear topics
+                    st.session_state.video_quiz = "" # Clear quiz
                     # Ensure PDF related states are reset when processing a new video
                     st.session_state.pdf_qa_chain = None
                     st.session_state.pdf_text_processed = False
                     st.session_state.pdf_chat_history = []
+                    st.session_state.pdf_summary = ""
+                    st.session_state.pdf_topics = ""
+                    st.session_state.pdf_quiz = ""
+                    st.session_state.current_pdf_text = ""
                 else:
                     st.warning("Could not find any transcripts for this video or video ID could not be extracted.")
                     st.info("Please ensure the URL is correct and the video is publicly accessible without restrictions.")
@@ -251,6 +330,9 @@ with tab1:
                             st.session_state.qa_chain = get_qa_chain(documents)
                             st.session_state.video_processed = True
                             st.session_state.chat_history = [] # Clear history for new transcript
+                            st.session_state.video_summary = "" # Clear summary on new load
+                            st.session_state.video_topics = "" # Clear topics on new load
+                            st.session_state.video_quiz = "" # Clear quiz on new load
                             st.success(f"✅ {lang_options[selected_lang_code]} transcript loaded successfully! You can now ask questions.")
                         except Exception as e:
                             st.error(f"Error during Langchain processing: {e}. Please ensure your GOOGLE_API_KEY is valid and correctly configured.")
@@ -269,6 +351,9 @@ with tab1:
             st.session_state.video_id = None
             st.session_state.available_languages = {}
             st.session_state.selected_language_code = 'en'
+            st.session_state.video_summary = ""
+            st.session_state.video_topics = ""
+            st.session_state.video_quiz = ""
             # No change to custom instructions or PDF data
             if os.path.exists("transcript.txt"):
                 os.remove("transcript.txt")
@@ -288,55 +373,134 @@ with tab1:
 
         # --- Summarization Feature ---
         st.subheader("📝 Video Summary")
-        if st.button("Generate Summary", key="generate_summary_button"):
-            with st.spinner("Generating summary..."):
-                try:
-                    full_text_for_summary = " ".join([item.text for item in st.session_state.full_transcript_data])
-                    summary_prompt = f"Please provide a concise summary of the following text:\n\n{full_text_for_summary}"
-                    llm_summary = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
-                    summary = llm_summary.invoke(summary_prompt).content
-                    with st.expander("View Summary"):
-                        st.info(f"**Summary:**\n{summary}")
-                except Exception as e:
-                    st.error(f"Error generating summary: {e}")
+        col_sum1, col_sum2 = st.columns([0.7, 0.3])
+        with col_sum1:
+            if st.button("Generate Summary", key="generate_summary_button"):
+                with st.spinner("Generating summary..."):
+                    try:
+                        full_text_for_summary = " ".join([item.text for item in st.session_state.full_transcript_data])
+                        summary_prompt = f"Please provide a concise summary of the following text:\n\n{full_text_for_summary}"
+                        llm_summary = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
+                        summary = llm_summary.invoke(summary_prompt).content
+                        st.session_state.video_summary = summary # Store summary
+                        with st.expander("View Summary"):
+                            st.info(f"**Summary:**\n{summary}")
+                    except Exception as e:
+                        st.error(f"Error generating summary: {e}")
+        with col_sum2:
+            if st.session_state.video_summary:
+                # Download button for PDF summary
+                pdf_bytes = create_pdf_from_text(st.session_state.video_summary, "Video Summary")
+                st.download_button(
+                    label="Download Summary (PDF)",
+                    data=pdf_bytes,
+                    file_name="video_summary.pdf",
+                    mime="application/pdf",
+                    key="download_video_summary_pdf"
+                )
+        if st.session_state.video_summary and not col_sum1.button("Generate Summary", key="generate_summary_button_re"): # Only show if summary exists and button isn't clicked again
+            with st.expander("View Stored Summary"):
+                st.info(f"**Summary:**\n{st.session_state.video_summary}")
+
 
         st.markdown("---")
 
         # --- Topic Modeling / Keyphrase Extraction ---
         st.subheader("💡 Key Topics & Phrases")
-        if st.button("Extract Topics & Phrases", key="extract_topics_button"):
-            with st.spinner("Extracting key information..."):
-                try: 
-                    full_text_for_topics = " ".join([item.text for item in st.session_state.full_transcript_data])
-                    
-                    # Prompt for topic extraction
-                    topic_prompt = (
-                        f"Analyze the following text and extract the most important key topics and phrases. "
-                        f"Present them as a bulleted list. Limit to 5-10 key points.\n\n"
-                        f"Text:\n{full_text_for_topics}"
-                    )
-                    
-                    llm_topics = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.5)
-                    topics = llm_topics.invoke(topic_prompt).content
-                    
-                    with st.expander("View Key Topics & Phrases"):
-                        st.markdown(topics) # Use markdown as LLM output might be formatted
-                except Exception as e: 
-                    st.error(f"Error extracting topics and phrases: {e}")
+        col_topic1, col_topic2 = st.columns([0.7, 0.3])
+        with col_topic1:
+            if st.button("Extract Topics & Phrases", key="extract_topics_button"):
+                with st.spinner("Extracting key information..."):
+                    try: 
+                        full_text_for_topics = " ".join([item.text for item in st.session_state.full_transcript_data])
+                        
+                        # Prompt for topic extraction
+                        topic_prompt = (
+                            f"Analyze the following text and extract the most important key topics and phrases. "
+                            f"Present them as a bulleted list. Limit to 5-10 key points.\n\n"
+                            f"Text:\n{full_text_for_topics}"
+                        )
+                        
+                        llm_topics = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.5)
+                        topics = llm_topics.invoke(topic_prompt).content
+                        st.session_state.video_topics = topics # Store topics
+                        with st.expander("View Key Topics & Phrases"):
+                            st.markdown(topics) # Use markdown as LLM output might be formatted
+                    except Exception as e: 
+                        st.error(f"Error extracting topics and phrases: {e}")
+        with col_topic2:
+            if st.session_state.video_topics:
+                # Download button for PDF topics
+                pdf_bytes = create_pdf_from_text(st.session_state.video_topics, "Video Key Topics")
+                st.download_button(
+                    label="Download Topics (PDF)",
+                    data=pdf_bytes,
+                    file_name="video_topics.pdf",
+                    mime="application/pdf",
+                    key="download_video_topics_pdf"
+                )
+        if st.session_state.video_topics and not col_topic1.button("Extract Topics & Phrases", key="extract_topics_button_re"): # Only show if topics exist and button isn't clicked again
+            with st.expander("View Stored Key Topics & Phrases"):
+                st.markdown(st.session_state.video_topics)
+
+
+        st.markdown("---")
+
+        # --- Quiz Generation ---
+        st.subheader("🧠 Generate Quiz")
+        col_quiz1, col_quiz2 = st.columns([0.7, 0.3])
+        with col_quiz1:
+            if st.button("Generate Quiz from Video", key="generate_video_quiz_button"):
+                with st.spinner("Generating quiz..."):
+                    video_full_text = " ".join([item.text for item in st.session_state.full_transcript_data])
+                    quiz_content = generate_quiz(video_full_text)
+                    st.session_state.video_quiz = quiz_content # Store the quiz
+                    with st.expander("View Quiz"):
+                        st.markdown(quiz_content)
+        with col_quiz2:
+            if st.session_state.get('video_quiz'):
+                # Download button for PDF quiz
+                pdf_bytes = create_pdf_from_text(st.session_state.video_quiz, "Video Quiz")
+                st.download_button(
+                    label="Download Quiz (PDF)",
+                    data=pdf_bytes,
+                    file_name="video_quiz.pdf",
+                    mime="application/pdf",
+                    key="download_video_quiz_pdf"
+                )
+        if st.session_state.get('video_quiz') and not col_quiz1.button("Generate Quiz from Video", key="generate_video_quiz_button_re"):
+            with st.expander("View Stored Quiz"):
+                st.markdown(st.session_state.video_quiz)
+
 
         st.markdown("---")
 
         # --- Transcript Viewer ---
         st.subheader("📖 Full Video Transcript")
-        with st.expander("Click to view transcript"):
+        col_transcript1, col_transcript2 = st.columns([0.7, 0.3])
+        with col_transcript1:
+            with st.expander("Click to view transcript"):
+                if st.session_state.full_transcript_data:
+                    transcript_display_text = ""
+                    for item in st.session_state.full_transcript_data:
+                        minutes = int(item.start // 60)
+                        seconds = int(item.start % 60)
+                        transcript_display_text += f"[{minutes:02d}:{seconds:02d}] {item.text}\n"
+                    st.text_area("Full Transcript", value=transcript_display_text, height=300, disabled=True)
+                else:
+                    st.write("Transcript not available.")
+        with col_transcript2:
             if st.session_state.full_transcript_data:
-                # Display transcript with timestamps
-                for item in st.session_state.full_transcript_data:
-                    minutes = int(item.start // 60)
-                    seconds = int(item.start % 60)
-                    st.write(f"**[{minutes:02d}:{seconds:02d}]** {item.text}")
-            else:
-                st.write("Transcript not available.")
+                full_text_for_download = "\n".join([f"[{int(item.start // 60):02d}:{int(item.start % 60):02d}] {item.text}" for item in st.session_state.full_transcript_data])
+                # Download button for PDF transcript
+                pdf_bytes = create_pdf_from_text(full_text_for_download, "Video Transcript")
+                st.download_button(
+                    label="Download Transcript (PDF)",
+                    data=pdf_bytes,
+                    file_name="video_transcript.pdf",
+                    mime="application/pdf",
+                    key="download_video_transcript_pdf"
+                )
 
         st.markdown("---")
 
@@ -434,10 +598,21 @@ with tab1:
         # --- Chat History Display ---
         st.subheader("💬 Chat History")
         if st.session_state.chat_history:
+            chat_history_text = ""
             for i, chat in enumerate(st.session_state.chat_history):
-                st.markdown(f"**Q{i+1}:** {chat['question']}")
-                st.markdown(f"**A{i+1}:** {chat['answer']}")
-                st.markdown("---")
+                chat_history_text += f"Q{i+1}: {chat['question']}\n"
+                chat_history_text += f"A{i+1}: {chat['answer']}\n---\n"
+            st.text_area("Conversation Log", value=chat_history_text, height=300, disabled=True, key="video_chat_display")
+            
+            # Download button for PDF chat history
+            pdf_bytes = create_pdf_from_text(chat_history_text, "Video Chat History")
+            st.download_button(
+                label="Download Chat History (PDF)",
+                data=pdf_bytes,
+                file_name="video_chat_history.pdf",
+                mime="application/pdf",
+                key="download_video_chat_pdf"
+            )
         else:
             st.write("No chat history yet for this video.")
 
@@ -455,6 +630,7 @@ with tab2:
             with st.spinner("Processing PDF... This may take a moment for large files."):
                 pdf_text = get_pdf_text(uploaded_file)
                 if pdf_text:
+                    st.session_state.current_pdf_text = pdf_text # Store PDF text
                     # Reset video-related states when processing a new PDF
                     st.session_state.qa_chain = None
                     st.session_state.full_transcript_data = []
@@ -463,6 +639,9 @@ with tab2:
                     st.session_state.video_id = None
                     st.session_state.available_languages = {}
                     st.session_state.selected_language_code = 'en'
+                    st.session_state.video_summary = ""
+                    st.session_state.video_topics = ""
+                    st.session_state.video_quiz = ""
 
                     # Process PDF text for QA
                     try:
@@ -473,6 +652,9 @@ with tab2:
                         st.session_state.pdf_qa_chain = get_qa_chain(pdf_documents)
                         st.session_state.pdf_text_processed = True
                         st.session_state.pdf_chat_history = [] # Clear PDF chat history
+                        st.session_state.pdf_summary = "" # Clear PDF summary
+                        st.session_state.pdf_topics = "" # Clear PDF topics
+                        st.session_state.pdf_quiz = "" # Clear PDF quiz
                         st.success("✅ PDF processed successfully! You can now ask questions about its content.")
                     except Exception as e:
                         st.error(f"Error during Langchain processing for PDF: {e}. Please ensure your GOOGLE_API_KEY is valid and correctly configured.")
@@ -480,16 +662,138 @@ with tab2:
                     st.warning("Could not extract text from the PDF. It might be an image-based PDF or corrupted.")
     
     # Clear PDF Data Button
-    if st.session_state.pdf_text_processed or st.session_state.pdf_chat_history:
+    if st.session_state.pdf_text_processed or st.session_state.pdf_chat_history or st.session_state.current_pdf_text:
         if st.button("🔄 Clear Current PDF Data & Chat", key="clear_pdf_data_button"):
             st.session_state.pdf_qa_chain = None
             st.session_state.pdf_text_processed = False
             st.session_state.pdf_chat_history = []
+            st.session_state.pdf_summary = ""
+            st.session_state.pdf_topics = ""
+            st.session_state.pdf_quiz = ""
+            st.session_state.current_pdf_text = ""
             st.success("PDF data and chat reset.")
 
     st.markdown("---")
 
     if st.session_state.pdf_text_processed:
+        # --- PDF Summarization Feature ---
+        st.subheader("📝 PDF Summary")
+        col_pdf_sum1, col_pdf_sum2 = st.columns([0.7, 0.3])
+        with col_pdf_sum1:
+            if st.button("Generate PDF Summary", key="generate_pdf_summary_button"):
+                with st.spinner("Generating PDF summary..."):
+                    try:
+                        summary_prompt = f"Please provide a concise summary of the following text:\n\n{st.session_state.current_pdf_text}"
+                        llm_summary = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.7)
+                        summary = llm_summary.invoke(summary_prompt).content
+                        st.session_state.pdf_summary = summary # Store PDF summary
+                        with st.expander("View PDF Summary"):
+                            st.info(f"**Summary:**\n{summary}")
+                    except Exception as e:
+                        st.error(f"Error generating PDF summary: {e}")
+        with col_pdf_sum2:
+            if st.session_state.pdf_summary:
+                # Download button for PDF summary
+                pdf_bytes = create_pdf_from_text(st.session_state.pdf_summary, "PDF Summary")
+                st.download_button(
+                    label="Download PDF Summary (PDF)",
+                    data=pdf_bytes,
+                    file_name="pdf_summary.pdf",
+                    mime="application/pdf",
+                    key="download_pdf_summary_pdf"
+                )
+        if st.session_state.pdf_summary and not col_pdf_sum1.button("Generate PDF Summary", key="generate_pdf_summary_button_re"):
+            with st.expander("View Stored PDF Summary"):
+                st.info(f"**Summary:**\n{st.session_state.pdf_summary}")
+
+        st.markdown("---")
+
+        # --- PDF Topic Modeling / Keyphrase Extraction ---
+        st.subheader("💡 PDF Key Topics & Phrases")
+        col_pdf_topic1, col_pdf_topic2 = st.columns([0.7, 0.3])
+        with col_pdf_topic1:
+            if st.button("Extract PDF Topics & Phrases", key="extract_pdf_topics_button"):
+                with st.spinner("Extracting key information from PDF..."):
+                    try: 
+                        topic_prompt = (
+                            f"Analyze the following text and extract the most important key topics and phrases. "
+                            f"Present them as a bulleted list. Limit to 5-10 key points.\n\n"
+                            f"Text:\n{st.session_state.current_pdf_text}"
+                        )
+                        llm_topics = ChatGoogleGenerativeAI(model="gemini-2.0-flash", temperature=0.5)
+                        topics = llm_topics.invoke(topic_prompt).content
+                        st.session_state.pdf_topics = topics # Store PDF topics
+                        with st.expander("View PDF Key Topics & Phrases"):
+                            st.markdown(topics) # Use markdown as LLM output might be formatted
+                    except Exception as e: 
+                        st.error(f"Error extracting PDF topics and phrases: {e}")
+        with col_pdf_topic2:
+            if st.session_state.pdf_topics:
+                # Download button for PDF topics
+                pdf_bytes = create_pdf_from_text(st.session_state.pdf_topics, "PDF Key Topics")
+                st.download_button(
+                    label="Download PDF Topics (PDF)",
+                    data=pdf_bytes,
+                    file_name="pdf_topics.pdf",
+                    mime="application/pdf",
+                    key="download_pdf_topics_pdf"
+                )
+        if st.session_state.pdf_topics and not col_pdf_topic1.button("Extract PDF Topics & Phrases", key="extract_pdf_topics_button_re"):
+            with st.expander("View Stored PDF Key Topics & Phrases"):
+                st.markdown(st.session_state.pdf_topics)
+
+        st.markdown("---")
+
+        # --- PDF Quiz Generation ---
+        st.subheader("🧠 Generate Quiz from PDF")
+        col_pdf_quiz1, col_pdf_quiz2 = st.columns([0.7, 0.3])
+        with col_pdf_quiz1:
+            if st.button("Generate Quiz from PDF", key="generate_pdf_quiz_button"):
+                with st.spinner("Generating quiz from PDF..."):
+                    quiz_content = generate_quiz(st.session_state.current_pdf_text)
+                    st.session_state.pdf_quiz = quiz_content # Store the quiz
+                    with st.expander("View Quiz"):
+                        st.markdown(quiz_content)
+        with col_pdf_quiz2:
+            if st.session_state.get('pdf_quiz'):
+                # Download button for PDF quiz
+                pdf_bytes = create_pdf_from_text(st.session_state.pdf_quiz, "PDF Quiz")
+                st.download_button(
+                    label="Download Quiz (PDF)",
+                    data=pdf_bytes,
+                    file_name="pdf_quiz.pdf",
+                    mime="application/pdf",
+                    key="download_pdf_quiz_pdf"
+                )
+        if st.session_state.get('pdf_quiz') and not col_pdf_quiz1.button("Generate Quiz from PDF", key="generate_pdf_quiz_button_re"):
+            with st.expander("View Stored Quiz"):
+                st.markdown(st.session_state.pdf_quiz)
+
+        st.markdown("---")
+
+        # --- PDF Text Viewer ---
+        st.subheader("📖 Full PDF Text")
+        col_pdf_text1, col_pdf_text2 = st.columns([0.7, 0.3])
+        with col_pdf_text1:
+            with st.expander("Click to view PDF text"):
+                if st.session_state.current_pdf_text:
+                    st.text_area("Full PDF Text", value=st.session_state.current_pdf_text, height=300, disabled=True, key="pdf_text_display")
+                else:
+                    st.write("PDF text not available.")
+        with col_pdf_text2:
+            if st.session_state.current_pdf_text:
+                # Download button for PDF text
+                pdf_bytes = create_pdf_from_text(st.session_state.current_pdf_text, "Full PDF Text")
+                st.download_button(
+                    label="Download PDF Text (PDF)",
+                    data=pdf_bytes,
+                    file_name="full_pdf_text.pdf",
+                    mime="application/pdf",
+                    key="download_pdf_text_pdf"
+                )
+
+        st.markdown("---")
+
         st.subheader("❓ Ask a Question about the PDF")
         pdf_question = st.text_input("Type your question here:", placeholder="e.g., What is the main conclusion of this document?", key="pdf_general_q")
         if pdf_question:
@@ -512,10 +816,21 @@ with tab2:
         st.markdown("---")
         st.subheader("💬 PDF Chat History")
         if st.session_state.pdf_chat_history:
+            pdf_chat_history_text = ""
             for i, chat in enumerate(st.session_state.pdf_chat_history):
-                st.markdown(f"**Q{i+1}:** {chat['question']}")
-                st.markdown(f"**A{i+1}:** {chat['answer']}")
-                st.markdown("---")
+                pdf_chat_history_text += f"Q{i+1}: {chat['question']}\n"
+                pdf_chat_history_text += f"A{i+1}: {chat['answer']}\n---\n"
+            st.text_area("Conversation Log (PDF)", value=pdf_chat_history_text, height=300, disabled=True, key="pdf_chat_display")
+            
+            # Download button for PDF chat history
+            pdf_bytes = create_pdf_from_text(pdf_chat_history_text, "PDF Chat History")
+            st.download_button(
+                label="Download PDF Chat History (PDF)",
+                data=pdf_bytes,
+                file_name="pdf_chat_history.pdf",
+                mime="application/pdf",
+                key="download_pdf_chat_pdf"
+            )
         else:
             st.write("No chat history yet for this PDF.")
     else:
